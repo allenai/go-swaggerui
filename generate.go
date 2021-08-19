@@ -1,5 +1,5 @@
-// This program downloads the dist assets for the current swagger-ui version and places them into the embed directory
-// TODO: Compress?
+// This program downloads the dist assets for the current swagger-ui version and
+// places them into the embed directory.
 
 // +build ignore
 
@@ -13,119 +13,161 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-type releaseResp []struct {
-	// TagName is a release tag name
-	TagName string `json:"tag_name"`
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
 
-func main() {
-	log.SetFlags(0)
-	releases := releaseResp{}
-	// get the releases so we can download the latest one
-	req, _ := http.NewRequest("GET", "https://api.github.com/repos/swagger-api/swagger-ui/releases", nil)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	resp, err := http.DefaultClient.Do(req)
+func run() error {
+	const (
+		embedPath   = "embed"
+		indexPath   = embedPath + "/index.html"
+		versionPath = "current_version.txt"
+	)
+
+	cv, err := ioutil.ReadFile("current_version.txt")
 	if err != nil {
-		log.Fatalf("error getting release list: %v", err)
+		return fmt.Errorf("couldn't read current_version.txt: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		log.Fatalf("got status [%s] on release list download", resp.Status)
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		log.Fatalf("error decoding response: %v", err)
-	}
-	resp.Body.Close()
-	if len(releases) == 0 {
-		log.Fatal("somehow got no releases, nothing to do")
-	}
-	tag := releases[0].TagName
+	current := string(bytes.TrimSpace(cv))
 
-	current, err := ioutil.ReadFile("current_version.txt")
+	fmt.Println("Checking latest releases...")
+
+	latest, err := latestVersion()
 	if err != nil {
-		log.Fatalf("unable to check version in current_version.txt: %v", err)
-	}
-	cv := string(bytes.TrimRight(current, "\n"))
-
-	if cv == tag {
-		log.Print("version is current, nothing to do")
-		os.Exit(0)
+		return fmt.Errorf("couldn't find latest version: %w", err)
 	}
 
-	log.Printf("downloading release %s...", tag)
+	if latest == current {
+		fmt.Printf("Already up-to-date (%s)\n", latest)
+		return nil
+	}
 
-	resp, err = http.Get(fmt.Sprintf("https://github.com/swagger-api/swagger-ui/archive/%s.tar.gz", tag))
+	fmt.Printf("Updating from %s to %s...\n", current, latest)
+
+	archiveURL := fmt.Sprintf("https://github.com/swagger-api/swagger-ui/archive/%s.tar.gz", latest)
+	resp, err := http.Get(archiveURL)
 	if err != nil {
-		log.Fatalf("error downloading release archive: %v", err)
+		return fmt.Errorf("couldn't download %s: %w", archiveURL, err)
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		log.Fatalf("got status [%s] on release archive download", resp.Status)
+		return fmt.Errorf("couldn't download %s: %s", archiveURL, resp.Status)
 	}
+
+	if err := os.RemoveAll("embed"); err != nil {
+		return fmt.Errorf("error removing old embed directory")
+	}
+	if err := os.Mkdir("embed", 0755); err != nil {
+		return fmt.Errorf("error recreating embed directory")
+	}
+
 	zr, err := gzip.NewReader(resp.Body)
 	if err != nil {
-		log.Fatalf("error opening file as gzip: %v", err)
+		return fmt.Errorf("error opening file as gzip: %w", err)
 	}
-	if err := os.RemoveAll("embed"); err != nil {
-		log.Fatalf("error removing old embed directory")
-	}
-	if err := os.Mkdir("embed", 0o700); err != nil {
-		log.Fatalf("error recreating embed directory")
-	}
-	tr := tar.NewReader(zr)
-	for {
+
+	for tr := tar.NewReader(zr); ; {
 		header, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			log.Fatalf("tar parsing error: %v", err)
+			return fmt.Errorf("tar parsing error: %w", err)
 		}
-		if header.Typeflag == tar.TypeReg {
-			// got a file, remove version directory
-			fname := header.Name[strings.Index(header.Name, `/`):]
-			if strings.HasPrefix(fname, `/dist`) {
-				fname = strings.TrimPrefix(fname, `/dist`)
-				out, err := os.Create(filepath.Join("embed", fname))
-				if err != nil {
-					log.Fatalf("error create output file: %v", err)
-				}
-				if _, err := io.Copy(out, tr); err != nil {
-					log.Fatalf("error writing output file: %v", err)
-				}
+
+		// Skip everything but regular files.
+		if header.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		filename := header.Name[strings.Index(header.Name, `/`):]
+		if strings.HasPrefix(filename, `/dist`) {
+			filename = strings.TrimPrefix(filename, `/dist`)
+			out, err := os.Create(filepath.Join("embed", filename))
+			if err != nil {
+				return fmt.Errorf("couldn't extract %s: %w", filename, err)
+			}
+			if _, err := io.Copy(out, tr); err != nil {
+				return fmt.Errorf("couldn't extract %s: %w", filename, err)
 			}
 		}
 	}
-	// replace the hard-coded JSON file with a generic file
-	idxFile, err := os.ReadFile(filepath.Join("embed", "index.html"))
+
+	fmt.Printf("Rewriting %s...\n", indexPath)
+
+	index, err := os.ReadFile(indexPath)
 	if err != nil {
-		log.Fatalf("error opening index.html for templating :%v", err)
+		return fmt.Errorf("couldn't read %s: %w", indexPath, err)
 	}
-	newidx := strings.Replace(
-		string(idxFile),
-		`url: "https://petstore.swagger.io/v2/swagger.json"`,
-		`url: "./swagger_spec"`,
-		-1,
-	)
-	newidxFile, err := os.Create(filepath.Join("embed", "index.html"))
+
+	index = bytes.ReplaceAll(
+		index,
+		[]byte(`url: "https://petstore.swagger.io/v2/swagger.json"`),
+		[]byte(`url: "{{.SwaggerURL}}"`))
+
+	if err := os.WriteFile(indexPath, index, 0644); err != nil {
+		return fmt.Errorf("couldn't write index.html: %w", err)
+	}
+
+	fmt.Println("Updating version...")
+
+	if err := os.WriteFile(versionPath, []byte(latest), 0644); err != nil {
+		return fmt.Errorf("couldn't write %s: %w", versionPath, err)
+	}
+
+	fmt.Println("Done. Please run the following command to push changes.")
+	fmt.Println()
+	fmt.Printf("git commit -am 'Update swaggerui to %[1]s' && git tag %[1]s && git push --tags\n", latest)
+	return nil
+}
+
+// latestVersion gets the latest released version.
+func latestVersion() (string, error) {
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/swagger-api/swagger-ui/releases", nil)
 	if err != nil {
-		log.Fatalf("error re-creating index.html file: %v", err)
+		return "", err
 	}
-	defer newidxFile.Close()
-	if _, err := newidxFile.WriteString(newidx); err != nil {
-		log.Fatalf("unable to write to index.html: %v", err)
-	}
-	newcv, err := os.Create("current_version.txt")
+
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
-		log.Fatalf("can't update current_version.txt: %v", err)
+		return "", fmt.Errorf("couldn't list releases: %w", err)
 	}
-	defer newcv.Close()
-	newcv.WriteString(tag)
-	log.Printf("updated swaggerui from %s => %s, please check templated index.html and retag repo", cv, tag)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("couldn't list releases: %s", resp.Status)
+	}
+
+	var releases []struct {
+		TagName    string `json:"tag_name"`
+		PreRelease bool   `json:"prerelease"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return "", fmt.Errorf("error decoding response: %w", err)
+	}
+
+	// This assumes releases are returned in descending order.
+	for _, release := range releases {
+		if release.PreRelease {
+			// We only want stable releases.
+			continue
+		}
+
+		return release.TagName, nil
+	}
+
+	return "", fmt.Errorf("no suitable releases")
 }

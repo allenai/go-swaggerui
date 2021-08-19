@@ -1,27 +1,46 @@
 # swaggerui
-Embedded, self-hosted [Swagger Ui](https://swagger.io/tools/swagger-ui/) for go servers
 
-This module provides `swaggerui.Handler`, which you can use to serve an embedded copy of [Swagger UI](https://swagger.io/tools/swagger-ui/) as well as an embedded specification for your API.
+Embedded, self-hosted [Swagger UI](https://swagger.io/tools/swagger-ui/) for Go servers.
+
+This package provides `swaggerui.Handler`, which you can use to serve an embedded copy of
+[Swagger UI](https://swagger.io/tools/swagger-ui/).
 
 ## Example usage
+
 ```go
 package main
 
 import (
 	_ "embed"
-	"log"
+	"fmt"
 	"net/http"
+	"os"
 
-	"github.com/flowchartsman/swaggerui"
+	"github.com/allenai/go-swaggerui"
 )
 
-//go:embed swagger.json
-var spec []byte
+//go:embed openapi.json
+var jsonSpec []byte
 
 func main() {
-	log.SetFlags(0)
-	http.Handle("/swagger/", http.StripPrefix("/swagger", swaggerui.Handler(spec)))
-	log.Println("serving on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	// Redirect /api to /api/ when serving UI.
+	http.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/api/", http.StatusFound)
+	})
+
+	// Serve Swagger UI using a relative path to the schema exposed below.
+	http.Handle("/api/", http.StripPrefix("/api", swaggerui.Handler("v1/openapi.json")))
+
+	// Serve the JSON-encoded schema.
+	http.HandleFunc("/api/v1/openapi.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json;charset=UTF-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write(jsonSpec)
+	})
+
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
 ```
