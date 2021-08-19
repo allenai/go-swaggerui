@@ -128,7 +128,7 @@ func run() error {
 
 	fmt.Println("Done. Please run the following command to push changes.")
 	fmt.Println()
-	fmt.Printf("git commit -am 'Update swaggerui to %[1]s' && git tag %[1]s && git push --tags\n", latest)
+	fmt.Printf("git commit -am 'Update swaggerui to %s' && git push\n", latest)
 	return nil
 }
 
