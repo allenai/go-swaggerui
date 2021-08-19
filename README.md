@@ -44,3 +44,7 @@ func main() {
 	}
 }
 ```
+
+## Updating Swagger UI
+
+Run `go generate ./...` and follow the printed instructions.
